@@ -1,4 +1,4 @@
-package myssh
+package myss
 
 import (
 	"github.com/any-call/myss/aeadstream"

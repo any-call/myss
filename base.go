@@ -1,4 +1,4 @@
-package myssh
+package myss
 
 import "net"
 
