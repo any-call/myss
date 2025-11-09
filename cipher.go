@@ -45,17 +45,17 @@ func ListCipher() []string {
 	return l
 }
 
-type aeadCipher struct{ aeadstream.Cipher }
+type AeadCipher struct{ aeadstream.Cipher }
 
-func (aead *aeadCipher) StreamConn(c net.Conn) net.Conn { return aeadstream.NewConn(c, aead) }
-func (aead *aeadCipher) PacketConn(c net.PacketConn) net.PacketConn {
+func (aead *AeadCipher) StreamConn(c net.Conn) net.Conn { return aeadstream.NewConn(c, aead) }
+func (aead *AeadCipher) PacketConn(c net.PacketConn) net.PacketConn {
 	return aeadstream.NewPacketConn(c, aead)
 }
 
-type streamCipher struct{ ssstream.Cipher }
+type StreamCipher struct{ ssstream.Cipher }
 
-func (ciph *streamCipher) StreamConn(c net.Conn) net.Conn { return ssstream.NewConn(c, ciph) }
-func (ciph *streamCipher) PacketConn(c net.PacketConn) net.PacketConn {
+func (ciph *StreamCipher) StreamConn(c net.Conn) net.Conn { return ssstream.NewConn(c, ciph) }
+func (ciph *StreamCipher) PacketConn(c net.PacketConn) net.PacketConn {
 	return ssstream.NewPacketConn(c, ciph)
 }
 

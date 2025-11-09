@@ -29,7 +29,7 @@ func PickCipher(name string, key []byte, password string) (Cipher, error) {
 		}
 
 		aead, err := choice.New(key)
-		return &aeadCipher{aead}, err
+		return &AeadCipher{aead}, err
 	}
 
 	if choice, ok := streamList[name]; ok {
@@ -40,7 +40,7 @@ func PickCipher(name string, key []byte, password string) (Cipher, error) {
 			return nil, ssstream.KeySizeError(choice.KeySize)
 		}
 		ciph, err := choice.New(key)
-		return &streamCipher{ciph}, err
+		return &StreamCipher{ciph}, err
 	}
 
 	return nil, ErrCipherNotSupported
