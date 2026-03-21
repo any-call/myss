@@ -177,24 +177,25 @@ func incrementNonce(b []byte) {
 }
 
 // identifyUDP 通过试探解密找到用户 PSK（UDP 用）。
+// sessionID 是 UDP 包头前 8 字节（用于 BLAKE3 子密钥派生）。
+// nonce 是 12 字节 AES-GCM nonce（由 packet_id 构造）。
 // ciphertext 是完整的 AEAD 密文（含 tag）。
-func (s *UserStore) identifyUDP(salt, ciphertext []byte) ([]byte, error) {
-	var zeroNonce [aesgcmNonceSize]byte
-	tmp := make([]byte, len(ciphertext))
+func (s *UserStore) identifyUDP(sessionID, nonce, ciphertext []byte) ([]byte, error) {
+	if len(ciphertext) <= aesgcmOverhead {
+		return nil, ErrUnknownUser
+	}
+	tmp := make([]byte, len(ciphertext)-aesgcmOverhead)
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	for _, rawPSK := range s.users {
-		subkey := blake3SessionSubkey(rawPSK, salt)
+		subkey := blake3SessionSubkey(rawPSK, sessionID) // 仅 session_id(8B)
 		aead, err := makeAESGCM(subkey)
 		if err != nil {
 			continue
 		}
-		if len(ciphertext) < aead.Overhead() {
-			continue
-		}
-		if _, err = aead.Open(tmp[:0], zeroNonce[:], ciphertext, nil); err == nil {
+		if _, err = aead.Open(tmp[:0], nonce, ciphertext, nil); err == nil {
 			return rawPSK, nil
 		}
 	}
