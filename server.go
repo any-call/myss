@@ -1,6 +1,8 @@
 package myss
 
 import (
+	"encoding/base64"
+	"fmt"
 	"github.com/any-call/myss/aeadstream"
 	"github.com/any-call/myss/ssstream"
 	"net"
@@ -18,6 +20,24 @@ func PickCipher(name string, key []byte, password string) (Cipher, error) {
 
 	if name == "dummy" {
 		return &dummy{}, nil
+	}
+
+	// 2022-edition ciphers: PSK must be high-entropy raw bytes.
+	// When key is empty, decode it from the base64-encoded password.
+	// The MD5-based kdf is intentionally not used here.
+	if choice, ok := ss2022List[name]; ok {
+		if len(key) == 0 {
+			var err error
+			key, err = base64.StdEncoding.DecodeString(password)
+			if err != nil {
+				return nil, fmt.Errorf("2022 cipher requires a base64-encoded PSK as password: %w", err)
+			}
+		}
+		if len(key) != choice.KeySize {
+			return nil, aeadstream.KeySizeError(choice.KeySize)
+		}
+		aead, err := choice.New(key)
+		return &AeadCipher{aead}, err
 	}
 
 	if choice, ok := aeadList[name]; ok {

@@ -21,6 +21,17 @@ var aeadList = map[string]struct {
 	"chacha20-ietf-poly1305": {32, aeadstream.Chacha20IETFPoly1305},
 }
 
+// ss2022List holds the 2022-edition ciphers.
+// These ciphers require a raw high-entropy PSK (no password-based kdf).
+// The password field in PickCipher is treated as a base64-encoded PSK.
+var ss2022List = map[string]struct {
+	KeySize int
+	New     func([]byte) (aeadstream.Cipher, error)
+}{
+	"2022-blake3-aes-128-gcm": {16, aeadstream.AESGCM2022},
+	"2022-blake3-aes-256-gcm": {32, aeadstream.AESGCM2022},
+}
+
 var streamList = map[string]struct {
 	KeySize int
 	New     func(key []byte) (ssstream.Cipher, error)
@@ -36,6 +47,9 @@ var streamList = map[string]struct {
 func ListCipher() []string {
 	var l []string
 	for k := range aeadList {
+		l = append(l, k)
+	}
+	for k := range ss2022List {
 		l = append(l, k)
 	}
 	for k := range streamList {
