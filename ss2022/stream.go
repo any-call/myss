@@ -3,17 +3,19 @@ package ss2022
 // TCP 多用户连接封装
 //
 // 读方向（客户端 → 服务端）：
-//   [session_id (keySize B)] [EIH (16 B)] [AEAD 加密块流...]
-//   ① 读 session_id + EIH
-//   ② identifyUser → 找到用户 / 拒绝
-//   ③ BLAKE3_derive_key(serverPSK, session_id) → AEAD 解密器
-//   ④ 后续字节交给 aeadstream.Reader 透明解密
+//   [requestSalt (keySize B)] [AEAD 加密块流 (size_chunk + payload_chunk + ...)]
+//
+//   ① 读 requestSalt
+//   ② 偷看首个 size chunk（2+16=18 字节），试探解密识别用户 PSK
+//   ③ 把偷看的字节"放回去"（io.MultiReader），用识别到的 PSK 建 AEAD Reader
+//   ④ Reader 从 nonce=0 开始正常处理完整流
 //
 // 写方向（服务端 → 客户端）：
-//   [response_salt (keySize B)] [AEAD 加密块流...]
-//   响应方向客户端持有 serverPSK 可直接解密，无需 EIH。
+//   [responseSalt (keySize B)] [AEAD 加密块流]
+//   响应使用同一用户 PSK + 新随机 responseSalt 派生子密钥。
 
 import (
+	"bytes"
 	"crypto/rand"
 	"io"
 	"net"
@@ -21,52 +23,49 @@ import (
 	"github.com/any-call/myss/aeadstream"
 )
 
-// streamConn 实现 net.Conn，对上层透明。
-// 上层感知不到 EIH 识别过程，直接 Read/Write 即可。
 type streamConn struct {
 	net.Conn
-	store  *UserStore
+	store   *UserStore
+	userPSK []byte // 识别成功后填充，initWriter 依赖它
 
-	r      io.Reader
-	w      io.Writer
-	userID string // 识别成功后填充，可通过 UserID() 查询
+	r io.Reader
+	w io.Writer
 }
 
-// UserID 返回本次连接识别到的用户 ID。
-// 在第一次 Read 之前调用会返回空字符串（识别尚未发生）。
-func (c *streamConn) UserID() string {
-	return c.userID
-}
-
-// initReader 在第一次 Read 时懒初始化：
-// 读取 session_id + EIH，完成用户识别，建立 AEAD 解密器。
+// initReader 在首次 Read 时触发：识别用户并建立解密流。
 func (c *streamConn) initReader() error {
-	// ① 读 session_id（同时也是请求方向的 salt）
-	sessionID := make([]byte, c.store.keySize)
-	if _, err := io.ReadFull(c.Conn, sessionID); err != nil {
+	ks := c.store.keySize
+
+	// ① 读 requestSalt
+	salt := make([]byte, ks)
+	if _, err := io.ReadFull(c.Conn, salt); err != nil {
 		return err
 	}
 
-	// ② 读 EIH
-	eih := make([]byte, eihSize)
-	if _, err := io.ReadFull(c.Conn, eih); err != nil {
+	// ② 偷看首个 AEAD size chunk（2 字节明文大小 + 16 字节 GCM tag）
+	//    这 18 字节足以完成 GCM 认证，用于试探解密
+	peek := make([]byte, 2+aesgcmOverhead)
+	if _, err := io.ReadFull(c.Conn, peek); err != nil {
 		return err
 	}
 
-	// ③ 用户识别：遍历用户表尝试解密 EIH
-	uid, err := c.store.identifyUser(sessionID, eih)
-	if err != nil {
-		return err // ErrUnknownUser → 上层关闭连接
-	}
-	c.userID = uid
-
-	// ④ 用 serverPSK + session_id 派生会话 AEAD（BLAKE3）
-	aead, err := c.store.serverCipher.Decrypter(sessionID)
+	// ③ 试探解密：用每个用户 PSK 尝试，GCM 认证通过即找到用户
+	userPSK, err := c.store.identifyTCP(salt, peek)
 	if err != nil {
 		return err
 	}
+	c.userPSK = userPSK
 
-	c.r = aeadstream.NewReader(c.Conn, aead)
+	// ④ 建 AEAD Reader：
+	//    用 io.MultiReader 把偷看的字节放回流头部，Reader 从 nonce=0 正常处理
+	subkey := blake3SessionSubkey(userPSK, salt)
+	aead, err := makeAESGCM(subkey)
+	if err != nil {
+		return err
+	}
+
+	combined := io.MultiReader(bytes.NewReader(peek), c.Conn)
+	c.r = aeadstream.NewReader(combined, aead)
 	return nil
 }
 
@@ -79,21 +78,26 @@ func (c *streamConn) Read(b []byte) (int, error) {
 	return c.r.Read(b)
 }
 
-// initWriter 在第一次 Write 时懒初始化：
-// 生成 response_salt，发送给客户端，建立 AEAD 加密器。
+// initWriter 在首次 Write 时触发：用识别到的用户 PSK 建立加密流。
+// SS 服务端模式下，客户端总是先发数据（Read 先于 Write），
+// 所以 initReader 一定在 initWriter 之前完成，userPSK 已有值。
 func (c *streamConn) initWriter() error {
-	// 响应方向使用独立的随机 salt，客户端用 serverPSK + salt 解密
+	if c.userPSK == nil {
+		return ErrUnknownUser
+	}
+
+	// 生成随机 responseSalt，发给客户端用于派生解密 key
 	salt := make([]byte, c.store.keySize)
 	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
 		return err
 	}
 
-	aead, err := c.store.serverCipher.Encrypter(salt)
+	subkey := blake3SessionSubkey(c.userPSK, salt)
+	aead, err := makeAESGCM(subkey)
 	if err != nil {
 		return err
 	}
 
-	// 先把 salt 明文发出去（客户端用它派生解密 key）
 	if _, err := c.Conn.Write(salt); err != nil {
 		return err
 	}
