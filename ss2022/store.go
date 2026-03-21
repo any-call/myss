@@ -25,6 +25,12 @@ const (
 	sessionContext  = "shadowsocks 2022 session subkey"
 	aesgcmOverhead  = 16 // AES-GCM 认证 tag 长度
 	aesgcmNonceSize = 12 // AES-GCM nonce 长度
+
+	// SS2022 TCP 固定头部（客户端请求方向）plaintext 大小：
+	//   type(1B) + timestamp(8B) + varHeaderLen(2B) = 11 字节
+	// 连同 GCM tag，wire 格式共 11+16 = 27 字节。
+	// identifyTCP / initReader 均以此大小为 peek 窗口。
+	fixedReqHeaderLen = 1 + 8 + 2 // = 11
 )
 
 // UserStore 是 SS2022 多用户服务端核心状态。
@@ -137,10 +143,12 @@ func makeAESGCM(key []byte) (cipher.AEAD, error) {
 }
 
 // identifyTCP 通过试探解密找到用户 PSK（TCP 用）。
-// peek 是首个 AEAD size chunk（2+16=18 字节），解密成功即认证通过。
+// peek 是 SS2022 TCP 固定头部的密文（fixedReqHeaderLen+aesgcmOverhead = 27 字节）：
+//   wire = AEAD( type(1B) | timestamp(8B) | varHeaderLen(2B) ) + GCM_tag(16B)
+// GCM 认证通过即找到用户，无需关心明文内容。
 func (s *UserStore) identifyTCP(salt, peek []byte) ([]byte, error) {
 	var zeroNonce [aesgcmNonceSize]byte
-	tmp := make([]byte, 2)
+	tmp := make([]byte, fixedReqHeaderLen) // 11 字节输出缓冲
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -156,6 +164,16 @@ func (s *UserStore) identifyTCP(salt, peek []byte) ([]byte, error) {
 		}
 	}
 	return nil, ErrUnknownUser
+}
+
+// incrementNonce 对小端无符号整数 b 做 +1，溢出时回绕（与 aeadstream.increment 逻辑一致）。
+func incrementNonce(b []byte) {
+	for i := range b {
+		b[i]++
+		if b[i] != 0 {
+			return
+		}
+	}
 }
 
 // identifyUDP 通过试探解密找到用户 PSK（UDP 用）。

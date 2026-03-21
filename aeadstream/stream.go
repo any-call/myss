@@ -23,6 +23,19 @@ func NewWriter(w io.Writer, aead cipher.AEAD) io.Writer {
 	return newWriter(w, aead)
 }
 
+// NewWriterWithNonce wraps an io.Writer with AEAD encryption, starting at startNonce.
+// startNonce must have the same length as aead.NonceSize(); it is copied and then
+// incremented in place after each sealed chunk.
+// Use this when the nonce counter must resume from a value > 0 (e.g. after two
+// standalone SS2022 header chunks the payload writer should start at nonce 2).
+func NewWriterWithNonce(w io.Writer, aead cipher.AEAD, startNonce []byte) io.Writer {
+	wr := newWriter(w, aead)
+	if len(startNonce) == len(wr.nonce) {
+		copy(wr.nonce, startNonce)
+	}
+	return wr
+}
+
 func newWriter(w io.Writer, aead cipher.AEAD) *Writer {
 	return &Writer{
 		Writer: w,
@@ -87,6 +100,19 @@ type Reader struct {
 // NewReader wraps an io.Reader with AEAD decryption.
 func NewReader(r io.Reader, aead cipher.AEAD) io.Reader {
 	return newReader(r, aead)
+}
+
+// NewReaderWithNonce wraps an io.Reader with AEAD decryption, starting at startNonce.
+// startNonce must have the same length as aead.NonceSize(); it is copied and then
+// incremented in place after each opened chunk part (size + payload = +2 per record).
+// Use this when the nonce counter must resume from a value > 0 (e.g. after two
+// standalone SS2022 header chunks the payload reader should start at nonce 2).
+func NewReaderWithNonce(r io.Reader, aead cipher.AEAD, startNonce []byte) io.Reader {
+	rd := newReader(r, aead)
+	if len(startNonce) == len(rd.nonce) {
+		copy(rd.nonce, startNonce)
+	}
+	return rd
 }
 
 func newReader(r io.Reader, aead cipher.AEAD) *Reader {
