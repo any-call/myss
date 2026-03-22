@@ -6,9 +6,10 @@ package ss2022
 //   [client_session_id (8B)] [packet_id (8B, BE)] [AEAD 密文 + tag]
 //   AEAD 明文：type(1B=0x00) | timestamp(8B) | padding_len(2B) | padding | SOCKS5地址 | payload
 //
-// SS2022 UDP 包格式（服务端 → 客户端，单用户模式）：
+// SS2022 UDP 包格式（服务端 → 客户端）：
 //   [server_session_id (8B)] [packet_id (8B, BE)] [AEAD 密文 + tag]
-//   AEAD 明文：type(1B=0x01) | timestamp(8B) | padding_len(2B) | padding | payload
+//   AEAD 明文：type(1B=0x01) | timestamp(8B) | client_session_id(8B) | padding_len(2B) | padding | payload
+//   注意：client_session_id 在单用户和多用户模式下均需包含（SIP022 协议规定）
 //
 // AEAD key：BLAKE3("shadowsocks 2022 session subkey", PSK || session_id[8B])
 // AEAD nonce：packet_id_big_endian[8B] || [0x00 × 4]  = 12 字节
@@ -31,9 +32,9 @@ const (
 	// 客户端请求内包固定头：type(1B) + timestamp(8B) + padding_len(2B) = 11 字节
 	udpClientInnerFixed = 1 + 8 + 2
 
-	// 服务端响应内包固定头（单用户模式）：type(1B) + timestamp(8B) + padding_len(2B) = 11 字节
-	// 注意：多用户 EIH 模式才有额外 client_session_id(8B)，单用户模式不含
-	udpServerInnerFixed = 1 + 8 + 2
+	// 服务端响应内包固定头：type(1B) + timestamp(8B) + client_session_id(8B) + padding_len(2B) = 19 字节
+	// SIP022 协议规定：单用户和多用户模式均须在响应中包含 client_session_id
+	udpServerInnerFixed = 1 + 8 + 8 + 2
 )
 
 var udpBufPool = sync.Pool{
@@ -171,12 +172,13 @@ func (c *packetConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 		return 0, err
 	}
 
-	// 构造响应内包明文（单用户模式，不含 client_session_id）：
-	//   type(1B=0x01) + timestamp(8B) + padding_len(2B=0) + payload
+	// 构造响应内包明文（SIP022 协议，含 client_session_id）：
+	//   type(1B=0x01) + timestamp(8B) + client_session_id(8B) + padding_len(2B=0) + payload
 	inner := make([]byte, udpServerInnerFixed+len(b))
 	inner[0] = 0x01 // server response type
 	binary.BigEndian.PutUint64(inner[1:9], uint64(time.Now().Unix()))
-	binary.BigEndian.PutUint16(inner[9:11], 0) // padding_len = 0
+	copy(inner[9:17], si.clientSessionID[:])    // client_session_id (8B)
+	binary.BigEndian.PutUint16(inner[17:19], 0) // padding_len = 0
 	copy(inner[udpServerInnerFixed:], b)
 
 	ciphertext := aead.Seal(nil, nonce[:], inner, nil)
