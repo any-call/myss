@@ -16,6 +16,8 @@ package ss2022
 import (
 	"crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -72,12 +74,21 @@ func (c *packetConn) ReadFrom(b []byte) (int, net.Addr, error) {
 		return 0, addr, err
 	}
 
+	// ── DEBUG: 打印原始 UDP 包前 40 字节，帮助确认协议格式 ──
+	dumpLen := n
+	if dumpLen > 40 {
+		dumpLen = 40
+	}
+	fmt.Printf("[ss2022 UDP DEBUG] from=%s  len=%d  hex[0:%d]=%s\n",
+		addr, n, dumpLen, hex.EncodeToString(buf[:dumpLen]))
+	// ────────────────────────────────────────────────────────
+
 	// 最小包：外层头部(16) + AEAD tag(16) + 内包最小(11) = 43
 	if n < udpOuterHdrSize+aesgcmOverhead+udpClientInnerFixed {
 		return 0, addr, ErrUnknownUser
 	}
 
-	sessionID := buf[0:8]     // client_session_id
+	sessionID := buf[0:8]      // client_session_id
 	packetIDBytes := buf[8:16] // packet_id（big-endian）
 	ciphertext := buf[16:n]
 
