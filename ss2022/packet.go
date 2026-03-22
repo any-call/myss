@@ -11,7 +11,8 @@ package ss2022
 //   AEAD 明文：type(1B=0x01) | timestamp(8B) | client_session_id(8B) | padding_len(2B) | padding | payload
 //
 // AEAD key：BLAKE3("shadowsocks 2022 session subkey", PSK || session_id[8B])
-// AEAD nonce：[0x00 × 4] || packet_id_big_endian[8B]  = 12 字节
+// AEAD nonce：packet_id_big_endian[8B] || [0x00 × 4]  = 12 字节
+//             （packet_id 在前 8 字节，后 4 字节补零，与 sing-shadowsocks 一致）
 
 import (
 	"crypto/rand"
@@ -56,10 +57,12 @@ type packetConn struct {
 }
 
 // buildUDPNonce 将 8 字节大端 packet_id 扩展为 12 字节 AES-GCM nonce：
-//   nonce = [0x00, 0x00, 0x00, 0x00] + packet_id_bytes[0:8]
+//   nonce = packet_id_bytes[0:8] + [0x00, 0x00, 0x00, 0x00]
+// 与 sing-shadowsocks 的实现一致：binary.BigEndian.PutUint64(nonce[:], packetID)
+// packet_id 放在 nonce 的前 8 字节，后 4 字节补零。
 func buildUDPNonce(packetIDBytes []byte) [aesgcmNonceSize]byte {
 	var nonce [aesgcmNonceSize]byte
-	copy(nonce[4:], packetIDBytes[:8])
+	copy(nonce[0:8], packetIDBytes[:8]) // packet_id 在 nonce[0:8]，nonce[8:12]=0
 	return nonce
 }
 
