@@ -1,14 +1,14 @@
 package ss2022
 
-// UDP 多用户包封装（符合 SIP022 SS2022 标准协议）
+// UDP 多用户包封装（符合 SIP022 SS2022 单用户模式标准协议）
 //
 // SS2022 UDP 包格式（客户端 → 服务端）：
 //   [client_session_id (8B)] [packet_id (8B, BE)] [AEAD 密文 + tag]
 //   AEAD 明文：type(1B=0x00) | timestamp(8B) | padding_len(2B) | padding | SOCKS5地址 | payload
 //
-// SS2022 UDP 包格式（服务端 → 客户端）：
+// SS2022 UDP 包格式（服务端 → 客户端，单用户模式）：
 //   [server_session_id (8B)] [packet_id (8B, BE)] [AEAD 密文 + tag]
-//   AEAD 明文：type(1B=0x01) | timestamp(8B) | client_session_id(8B) | padding_len(2B) | padding | payload
+//   AEAD 明文：type(1B=0x01) | timestamp(8B) | padding_len(2B) | padding | payload
 //
 // AEAD key：BLAKE3("shadowsocks 2022 session subkey", PSK || session_id[8B])
 // AEAD nonce：packet_id_big_endian[8B] || [0x00 × 4]  = 12 字节
@@ -17,8 +17,6 @@ package ss2022
 import (
 	"crypto/rand"
 	"encoding/binary"
-	"encoding/hex"
-	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -26,15 +24,16 @@ import (
 )
 
 const (
-	udpSessionIDSize = 8                              // session_id: 8 字节
-	udpPacketIDSize  = 8                              // packet_id: 8 字节（big-endian）
-	udpOuterHdrSize  = udpSessionIDSize + udpPacketIDSize // 外层头部共 16 字节
+	udpSessionIDSize = 8                                   // session_id: 8 字节
+	udpPacketIDSize  = 8                                   // packet_id: 8 字节（big-endian）
+	udpOuterHdrSize  = udpSessionIDSize + udpPacketIDSize  // 外层头部共 16 字节
 
-	// 客户端内包固定头：type(1B) + timestamp(8B) + padding_len(2B) = 11 字节
+	// 客户端请求内包固定头：type(1B) + timestamp(8B) + padding_len(2B) = 11 字节
 	udpClientInnerFixed = 1 + 8 + 2
 
-	// 服务端响应内包固定头：type(1B) + timestamp(8B) + client_session_id(8B) + padding_len(2B) = 19 字节
-	udpServerInnerFixed = 1 + 8 + 8 + 2
+	// 服务端响应内包固定头（单用户模式）：type(1B) + timestamp(8B) + padding_len(2B) = 11 字节
+	// 注意：多用户 EIH 模式才有额外 client_session_id(8B)，单用户模式不含
+	udpServerInnerFixed = 1 + 8 + 2
 )
 
 var udpBufPool = sync.Pool{
@@ -57,8 +56,10 @@ type packetConn struct {
 }
 
 // buildUDPNonce 将 8 字节大端 packet_id 扩展为 12 字节 AES-GCM nonce：
-//   nonce = packet_id_bytes[0:8] + [0x00, 0x00, 0x00, 0x00]
-// 与 sing-shadowsocks 的实现一致：binary.BigEndian.PutUint64(nonce[:], packetID)
+//
+//	nonce = packet_id_bytes[0:8] + [0x00 × 4]
+//
+// 与 sing-shadowsocks 一致：binary.BigEndian.PutUint64(nonce[:], packetID)
 // packet_id 放在 nonce 的前 8 字节，后 4 字节补零。
 func buildUDPNonce(packetIDBytes []byte) [aesgcmNonceSize]byte {
 	var nonce [aesgcmNonceSize]byte
@@ -76,15 +77,6 @@ func (c *packetConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	if err != nil {
 		return 0, addr, err
 	}
-
-	// ── DEBUG: 打印原始 UDP 包前 40 字节，帮助确认协议格式 ──
-	dumpLen := n
-	if dumpLen > 40 {
-		dumpLen = 40
-	}
-	fmt.Printf("[ss2022 UDP DEBUG] from=%s  len=%d  hex[0:%d]=%s\n",
-		addr, n, dumpLen, hex.EncodeToString(buf[:dumpLen]))
-	// ────────────────────────────────────────────────────────
 
 	// 最小包：外层头部(16) + AEAD tag(16) + 内包最小(11) = 43
 	if n < udpOuterHdrSize+aesgcmOverhead+udpClientInnerFixed {
@@ -156,7 +148,7 @@ func (c *packetConn) ReadFrom(b []byte) (int, net.Addr, error) {
 	return len(payload), addr, nil
 }
 
-// WriteTo 加密 b 并发送到 addr（服务端 → 客户端），符合 SS2022 UDP 响应格式。
+// WriteTo 加密 b 并发送到 addr（服务端 → 客户端），符合 SS2022 单用户模式 UDP 响应格式。
 func (c *packetConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 	v, ok := c.addrCache.Load(addr.String())
 	if !ok {
@@ -179,13 +171,12 @@ func (c *packetConn) WriteTo(b []byte, addr net.Addr) (int, error) {
 		return 0, err
 	}
 
-	// 构造响应内包明文：
-	//   type(1B=0x01) + timestamp(8B) + client_session_id(8B) + padding_len(2B=0) + payload
+	// 构造响应内包明文（单用户模式，不含 client_session_id）：
+	//   type(1B=0x01) + timestamp(8B) + padding_len(2B=0) + payload
 	inner := make([]byte, udpServerInnerFixed+len(b))
 	inner[0] = 0x01 // server response type
-	binary.BigEndian.PutUint64(inner[1:], uint64(time.Now().Unix()))
-	copy(inner[9:17], si.clientSessionID[:])
-	binary.BigEndian.PutUint16(inner[17:19], 0) // padding_len = 0
+	binary.BigEndian.PutUint64(inner[1:9], uint64(time.Now().Unix()))
+	binary.BigEndian.PutUint16(inner[9:11], 0) // padding_len = 0
 	copy(inner[udpServerInnerFixed:], b)
 
 	ciphertext := aead.Seal(nil, nonce[:], inner, nil)
